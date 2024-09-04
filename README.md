@@ -1,3 +1,48 @@
+# Fork of vLLM for Top-k work
+
+## Getting started
+1. Create a conda environment for this fork of vLLM. We're going to end up building the cuda kernels from scratch so we need a bunch of cpu cores and it will still take about an hour.
+   ```
+   srun --pty --cpus-per-task=16 --mem=128G --account=cml --qos=cml-cpu --partition=cml-cpu  --time=8:00:00 bash
+   conda env create -f conda_vllm.yml
+   ```
+   If this is successful you should get output like:
+   ```
+   ...
+   done
+   #
+   # To activate this environment, use
+   #
+   #     $ conda activate vllm_topk
+   #
+   # To deactivate an active environment, use
+   #
+   #     $ conda deactivate
+   ```
+3. Once the conda environment has been created, confirm that vllm is working correctly by running `vllm_test.py`:
+   ```
+   srun --pty --gres=gpu:rtxa5000:1 --cpus-per-task=4 --mem=30G --qos=scavenger --account=scavenger --partition=scavenger --time=1:00:0
+   conda activate vllm_topk
+   python topk_stuff/vllm_test.py
+   ```
+   You should get output like:
+   ```
+   Creating dataset of 1 examples with 1000 tokens per example.
+   ...
+   Processed prompts: 100%|████████████████████████| 1/1 [00:05<00:00,  5.14s/it, est. speed input: 222.00 toks/s, output: 38.88 toks/s]
+   Prompt: 'Remember the following Wikipedia articles:\n\nTitle: 1951 Western Michigan Broncos football team\nURL: https://en.wikipedia.
+   ...
+   ``` 
+
+## Modifying Llama
+We can modify the Llama model code at `vllm/model_executor/models/llama.py`. If we want to add a new model, there are instructions here: https://docs.vllm.ai/en/latest/models/adding_model.html.
+
+
+<br>
+Original README:
+
+----------------
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/logos/vllm-logo-text-dark.png">
