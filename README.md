@@ -1,10 +1,13 @@
 # Fork of vLLM for Top-k work
 
 ## Getting started
-1. Create a conda environment for this fork of vLLM. We're going to end up building the cuda kernels from scratch so we need a bunch of cpu cores and it will still take about an hour.
+1. Load gcc and cuda compilers:
+   ```
+   module load gcc/11.2.0 cuda/12.1.1
+   ```
+2. Create a conda environment for this fork of vLLM. We're going to end up building the cuda kernels from scratch so we need a bunch of cpu cores and it will still take about an hour.
    ```
    srun --pty --cpus-per-task=16 --mem=128G --account=cml --qos=cml-cpu --partition=cml-cpu  --time=8:00:00 bash
-   module load gcc/11.2.0 cuda/12.1.1
    conda env create -f conda_vllm.yml
    ```
    If this is successful you should get output like:
