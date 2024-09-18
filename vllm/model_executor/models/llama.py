@@ -580,5 +580,5 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
     
     def __del__(self):
         # Save the last example's kv cache to disk
-        torch.save(LlamaAttention.k_cache, f"k-{LlamaAttention.cur_example}.pt")
-        torch.save(LlamaAttention.v_cache, f"v-{LlamaAttention.cur_example}.pt")
+        torch.save(LlamaAttention.k_cache, f"k.pt")
+        torch.save(LlamaAttention.v_cache, f"v.pt")
