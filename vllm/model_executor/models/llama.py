@@ -21,6 +21,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
+import os
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
@@ -92,6 +93,11 @@ class LlamaMLP(nn.Module):
 
 class LlamaAttention(nn.Module):
 
+    # For use in saving kv cache to disk over multiple examples
+    cur_example = None
+    k_cache = [[] for _ in range(32)]
+    v_cache = [[] for _ in range(32)]
+
     def __init__(
         self,
         config: LlamaConfig,
@@ -107,6 +113,8 @@ class LlamaAttention(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        self.prefix = prefix
+        self.config = config
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -178,6 +186,26 @@ class LlamaAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
+        
+        cwd = os.getcwd()
+        if "outputs" in cwd:
+            cur_example = cwd.split("/")[-1] # "outputs/model/task/example_1"
+            if LlamaAttention.cur_example is None:
+                LlamaAttention.cur_example = cur_example
+            # vLLM iterates over the token sequence in small chunks so we keep
+            # appending these chunks until we hit a new example.
+            # Check to see if we started a new example, and if so save the cache to disk and reset it.
+            # Use __del__ of the model to save the last example.
+            if cur_example != LlamaAttention.cur_example:
+                torch.save(LlamaAttention.k_cache, f"../{LlamaAttention.cur_example}/k.pt")
+                torch.save(LlamaAttention.v_cache, f"../{LlamaAttention.cur_example}/v.pt")
+                LlamaAttention.k_cache = [[] for _ in range(self.config.num_hidden_layers)]
+                LlamaAttention.v_cache = [[] for _ in range(self.config.num_hidden_layers)]
+                LlamaAttention.cur_example = cur_example
+            layer_idx = int(self.prefix.split(".")[2]) # "model.layers.0.self_attn"
+            LlamaAttention.k_cache[layer_idx].append(k.cpu())
+            LlamaAttention.v_cache[layer_idx].append(v.cpu())
+        
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
         return output
@@ -549,3 +577,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
             else:
                 raise RuntimeError("Self attention has no KV cache scaling "
                                    "factor attribute!")
+    
+    def __del__(self):
+        # Save the last example's kv cache to disk
+        torch.save(LlamaAttention.k_cache, f"k.pt")
+        torch.save(LlamaAttention.v_cache, f"v.pt")
