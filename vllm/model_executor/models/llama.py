@@ -22,6 +22,7 @@
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 import os
+import einops
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
@@ -188,20 +189,21 @@ class LlamaAttention(nn.Module):
         q, k = self.rotary_emb(positions, q, k)
         
         cwd = os.getcwd()
-        if "outputs" in cwd:
-            cur_example = cwd.split("/")[-1] # "outputs/model/task/example_1"
+        # TODO: We are using the path of the cwd as a flag to save kv cache to disk. Use some global flag instead.
+        if "kv_caches" in cwd:
+            cwd_example = cwd.split("/")[-1] # "outputs/model/task/example_1"
             if LlamaAttention.cur_example is None:
-                LlamaAttention.cur_example = cur_example
+                LlamaAttention.cur_example = cwd_example
             # vLLM iterates over the token sequence in small chunks so we keep
             # appending these chunks until we hit a new example.
             # Check to see if we started a new example, and if so save the cache to disk and reset it.
             # Use __del__ of the model to save the last example.
-            if cur_example != LlamaAttention.cur_example:
-                torch.save(LlamaAttention.k_cache, f"../{LlamaAttention.cur_example}/k.pt")
-                torch.save(LlamaAttention.v_cache, f"../{LlamaAttention.cur_example}/v.pt")
+            if cwd_example != LlamaAttention.cur_example:
+                LlamaAttention.save_kv_cache(LlamaAttention.k_cache, LlamaAttention.v_cache, self.num_kv_heads, cwd_example)
+                # Reset the cache
                 LlamaAttention.k_cache = [[] for _ in range(self.config.num_hidden_layers)]
                 LlamaAttention.v_cache = [[] for _ in range(self.config.num_hidden_layers)]
-                LlamaAttention.cur_example = cur_example
+                LlamaAttention.cur_example = cwd_example
             layer_idx = int(self.prefix.split(".")[2]) # "model.layers.0.self_attn"
             LlamaAttention.k_cache[layer_idx].append(k.cpu())
             LlamaAttention.v_cache[layer_idx].append(v.cpu())
@@ -209,6 +211,53 @@ class LlamaAttention(nn.Module):
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
         return output
+    
+    @staticmethod
+    def save_kv_cache(k_cache, v_cache, num_heads, cwd_example):
+        # k_cache comes in shape (num_layers, num_chunks, tokens_per_chunk, num_heads*head_dim)
+        # where the first two dimensions are a list of lists and the last three are a tensor
+        # Reshape the cache to be (2, num_layers, num_heads, num_tokens, head_dim)
+        k = []
+        v = []
+        for layer in k_cache:
+            # Concatenate the chunks over sequence length (unique to vllm)
+            n_hd_tensor = torch.cat(layer, dim=0)
+            h_n_d_tensor = einops.rearrange(n_hd_tensor, "n (h d) -> h n d", h=num_heads)
+            k.append(h_n_d_tensor)
+        for layer in v_cache:
+            n_hd_tensor = torch.cat(layer, dim=0)
+            h_n_d_tensor = einops.rearrange(n_hd_tensor, "n (h d) -> h n d", h=num_heads)
+            v.append(h_n_d_tensor)
+        # Stack over the layer dimension
+        k = torch.stack(k, dim=0)
+        v = torch.stack(v, dim=0)
+        # Stack K and V together
+        kv_cache = torch.stack([k, v], dim=0)
+        
+        # Create a little example file for future users of the kv_cache
+        python_code = '''# Example to show the shape of the kv_cache.pt file
+# For Llama3-8b it is (2, 32, 8, N, 128)
+import torch
+
+kv_cache = torch.load("kv_cache.pt")
+kv, num_layers, num_heads, num_tokens, head_dim = kv_cache.shape
+print(f"kv_cache.shape: {kv_cache.shape}")
+print(f"""kv: {kv}
+num_layers: {num_layers}
+num_heads: {num_heads}
+num_tokens: {num_tokens}
+head_dim: {head_dim}""")
+'''
+        if cwd_example == LlamaAttention.cur_example:
+            torch.save(kv_cache, "kv_cache.pt")
+            with open("how_to_use.py", "w") as file:
+                file.write(python_code)
+        else:
+            # Don't save to the cwd because we often save at the beginning of the next example 
+            # (we don't know when the chunks are finished until we switch examples)
+            torch.save(kv_cache, f"../{LlamaAttention.cur_example}/kv_cache.pt")
+            with open(f"../{LlamaAttention.cur_example}/how_to_use.py", "w") as file:
+                file.write(python_code)
 
 
 class LlamaDecoderLayer(nn.Module):
@@ -580,5 +629,4 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
     
     def __del__(self):
         # Save the last example's kv cache to disk
-        torch.save(LlamaAttention.k_cache, f"k.pt")
-        torch.save(LlamaAttention.v_cache, f"v.pt")
+        LlamaAttention.save_kv_cache(LlamaAttention.k_cache, LlamaAttention.v_cache, self.model.config.num_key_value_heads, LlamaAttention.cur_example)
